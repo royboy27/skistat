@@ -5,7 +5,7 @@
   },
   "deploy": {
     "startCommand": "node migrations/run.js && node src/index.js",
-    "healthcheckPath": "/health",
+    "healthcheckPath": "/",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5
