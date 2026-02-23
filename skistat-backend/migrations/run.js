@@ -33,7 +33,7 @@ router.post('/', authenticate,
   async (req, res, next) => {
     try {
       const errors = validationResult(req);
-      if (!errors.isEmpty()) return error(res, errors.array()[0].msg, 400);
+      if (!errors.isEmpty()) return error(res, JSON.stringify(errors.array()), 400);
 
       const {
         id, startTime, endTime, runName, resortName, resortLatitude, resortLongitude,
