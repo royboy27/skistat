@@ -1,9 +1,5 @@
-const express = require('express');
-const { param, query: queryParam, validationResult } = require('express-validator');
-const { authenticate } = require('../src/middleware/auth');
-const { query } = require('../config/database');
-const { success, error, paginated, NotFoundError } = require('../utils/helpers');
-
+require('dotenv').config();
+const { pool } = require('../config/database');
 const router = express.Router();
 
 // ============================================
