@@ -1,5 +1,5 @@
 const express = require('express');
-const { body, param, query: queryParam, validationResult } = require('express-validator');
+const { param, query: queryParam, validationResult } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const { query } = require('../../config/database');
 const { success, error, paginated, NotFoundError } = require('../utils/helpers');
@@ -7,98 +7,81 @@ const { success, error, paginated, NotFoundError } = require('../utils/helpers')
 const router = express.Router();
 
 // ============================================
-// POST /v1/runs — Upload a run
+// POST /v1/runs — Upload a run (NO express-validator)
 // ============================================
-router.post('/', authenticate,
-  [
-    body('id').isUUID().withMessage('Valid run ID required'),
-    body('startTime').isISO8601().withMessage('Valid start time required'),
-    body('endTime').optional().isISO8601(),
-    body('runName').optional().isLength({ max: 255 }).trim(),
-    body('resortName').optional().isLength({ max: 255 }).trim(),
-    body('distance').isNumeric().withMessage('distance must be a number'),
-    body('maxSpeed').isNumeric().withMessage('maxSpeed must be a number'),
-    body('averageSpeed').isNumeric().withMessage('averageSpeed must be a number'),
-    body('elevationDrop').isNumeric().withMessage('elevationDrop must be a number'),
-    body('startElevation').isNumeric().withMessage('startElevation must be a number'),
-    body('endElevation').isNumeric().withMessage('endElevation must be a number'),
-    body('duration').isNumeric().withMessage('duration must be a number'),
-    body('points').isNumeric().withMessage('points must be a number'),
-    body('difficulty').optional().isString(),
-    body('calories').optional().isNumeric(),
-    body('avgHeartRate').optional().isNumeric(),
-    body('maxHeartRate').optional().isNumeric(),
-    body('routeData').optional(),
-  ],
-  async (req, res, next) => {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) return error(res, JSON.stringify(errors.array()), 400);
+router.post('/', authenticate, async (req, res, next) => {
+  try {
+    const {
+      id, clientId, startTime, endTime, runName, resortName, resortLatitude, resortLongitude,
+      distance, maxSpeed, averageSpeed, elevationDrop, startElevation, endElevation,
+      duration, points, difficulty, calories, avgHeartRate, maxHeartRate, routeData,
+    } = req.body;
 
-      const {
-        id, startTime, endTime, runName, resortName, resortLatitude, resortLongitude,
-        distance, maxSpeed, averageSpeed, elevationDrop, startElevation, endElevation,
-        duration, points, difficulty, calories, avgHeartRate, maxHeartRate, routeData,
-      } = req.body;
+    // Accept either 'id' or 'clientId'
+    const runId = id || clientId;
 
-      // Upsert — allow re-uploading same run (idempotent)
-      await query(
-        `INSERT INTO runs (
-          id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
-          start_time, end_time, distance, max_speed, average_speed,
-          elevation_drop, start_elevation, end_elevation, duration,
-          points, difficulty, calories, avg_heart_rate, max_heart_rate, route_data
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-        ON CONFLICT (id) DO UPDATE SET
-          run_name = EXCLUDED.run_name,
-          resort_name = EXCLUDED.resort_name,
-          end_time = EXCLUDED.end_time,
-          distance = EXCLUDED.distance,
-          max_speed = EXCLUDED.max_speed,
-          average_speed = EXCLUDED.average_speed,
-          elevation_drop = EXCLUDED.elevation_drop,
-          points = EXCLUDED.points,
-          difficulty = EXCLUDED.difficulty,
-          calories = EXCLUDED.calories,
-          avg_heart_rate = EXCLUDED.avg_heart_rate,
-          max_heart_rate = EXCLUDED.max_heart_rate,
-          route_data = EXCLUDED.route_data,
-          updated_at = NOW()`,
-        [
-          id, req.user.id, runName, resortName, resortLatitude || null, resortLongitude || null,
-          startTime, endTime || null, distance, maxSpeed, averageSpeed,
-          elevationDrop, startElevation, endElevation, duration,
-          points, difficulty || 'Blue', calories || 0, avgHeartRate || 0, maxHeartRate || 0,
-          routeData ? JSON.stringify(routeData) : null,
-        ]
-      );
+    if (!runId) return error(res, 'Run ID required (id or clientId)', 400);
+    if (!startTime) return error(res, 'startTime required', 400);
 
-      return success(res, { id, synced: true }, 201);
-    } catch (err) {
-      next(err);
-    }
+    await query(
+      `INSERT INTO runs (
+        id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
+        start_time, end_time, distance, max_speed, average_speed,
+        elevation_drop, start_elevation, end_elevation, duration,
+        points, difficulty, calories, avg_heart_rate, max_heart_rate, route_data
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+      ON CONFLICT (id) DO UPDATE SET
+        run_name = EXCLUDED.run_name,
+        resort_name = EXCLUDED.resort_name,
+        end_time = EXCLUDED.end_time,
+        distance = EXCLUDED.distance,
+        max_speed = EXCLUDED.max_speed,
+        average_speed = EXCLUDED.average_speed,
+        elevation_drop = EXCLUDED.elevation_drop,
+        points = EXCLUDED.points,
+        difficulty = EXCLUDED.difficulty,
+        calories = EXCLUDED.calories,
+        avg_heart_rate = EXCLUDED.avg_heart_rate,
+        max_heart_rate = EXCLUDED.max_heart_rate,
+        route_data = EXCLUDED.route_data,
+        updated_at = NOW()`,
+      [
+        runId, req.user.id, runName || null, resortName || null,
+        resortLatitude || null, resortLongitude || null,
+        startTime, endTime || null,
+        distance || 0, maxSpeed || 0, averageSpeed || 0,
+        elevationDrop || 0, startElevation || 0, endElevation || 0,
+        duration || 0, points || 0, difficulty || 'blue',
+        calories || 0, avgHeartRate || 0, maxHeartRate || 0,
+        routeData ? JSON.stringify(routeData) : null,
+      ]
+    );
+
+    return success(res, { runId, clientId: runId, synced: true }, 201);
+  } catch (err) {
+    next(err);
   }
-);
+});
 
 // ============================================
-// POST /v1/runs/batch — Upload multiple runs
+// POST /v1/runs/bulk — Upload multiple runs
 // ============================================
-router.post('/batch', authenticate, async (req, res, next) => {
+router.post('/bulk', authenticate, async (req, res, next) => {
   try {
     const { runs } = req.body;
     if (!Array.isArray(runs) || runs.length === 0) {
       return error(res, 'Runs array required', 400);
     }
-
     if (runs.length > 50) {
       return error(res, 'Maximum 50 runs per batch', 400);
     }
 
-    const synced = [];
-    const failed = [];
-
+    const results = [];
     for (const run of runs) {
       try {
+        const runId = run.id || run.clientId;
+        if (!runId) { results.push({ clientId: 'unknown', status: 'error', error: 'No ID' }); continue; }
+
         await query(
           `INSERT INTO runs (
             id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
@@ -107,28 +90,40 @@ router.post('/batch', authenticate, async (req, res, next) => {
             points, difficulty, calories, avg_heart_rate, max_heart_rate, route_data
           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
           ON CONFLICT (id) DO UPDATE SET
-            run_name = EXCLUDED.run_name, points = EXCLUDED.points, updated_at = NOW()`,
+            run_name = EXCLUDED.run_name, resort_name = EXCLUDED.resort_name,
+            points = EXCLUDED.points, distance = EXCLUDED.distance,
+            max_speed = EXCLUDED.max_speed, elevation_drop = EXCLUDED.elevation_drop,
+            updated_at = NOW()`,
           [
-            run.id, req.user.id, run.runName, run.resortName,
+            runId, req.user.id, run.runName || null, run.resortName || null,
             run.resortLatitude || null, run.resortLongitude || null,
-            run.startTime, run.endTime || null, run.distance || 0,
-            run.maxSpeed || 0, run.averageSpeed || 0, run.elevationDrop || 0,
-            run.startElevation || 0, run.endElevation || 0, run.duration || 0,
-            run.points || 0, run.difficulty || 'Blue', run.calories || 0,
-            run.avgHeartRate || 0, run.maxHeartRate || 0,
+            run.startTime, run.endTime || null,
+            run.distance || 0, run.maxSpeed || 0, run.averageSpeed || 0,
+            run.elevationDrop || 0, run.startElevation || 0, run.endElevation || 0,
+            run.duration || 0, run.points || 0, run.difficulty || 'blue',
+            run.calories || 0, run.avgHeartRate || 0, run.maxHeartRate || 0,
             run.routeData ? JSON.stringify(run.routeData) : null,
           ]
         );
-        synced.push(run.id);
+        results.push({ clientId: runId, status: 'created', serverId: runId });
       } catch (err) {
-        failed.push({ id: run.id, error: err.message });
+        results.push({ clientId: run.id || run.clientId || 'unknown', status: 'error', error: err.message });
       }
     }
 
-    return success(res, { synced, failed });
+    return success(res, { results });
   } catch (err) {
     next(err);
   }
+});
+
+// ============================================
+// POST /v1/runs/batch — Alias for /bulk
+// ============================================
+router.post('/batch', authenticate, async (req, res, next) => {
+  // Forward to bulk handler
+  req.url = '/bulk';
+  router.handle(req, res, next);
 });
 
 // ============================================
@@ -235,20 +230,17 @@ router.delete('/:id', authenticate,
 );
 
 // ============================================
-// GET /v1/runs/sync/status — Get sync status
-// Returns runs updated after a given timestamp
+// GET /v1/runs/sync/status
 // ============================================
 router.get('/sync/status', authenticate, async (req, res, next) => {
   try {
     const since = req.query.since || '1970-01-01T00:00:00Z';
-
     const result = await query(
       `SELECT id, updated_at FROM runs
        WHERE user_id = $1 AND is_deleted = false AND updated_at > $2
        ORDER BY updated_at DESC`,
       [req.user.id, since]
     );
-
     return success(res, {
       updatedRuns: result.rows.map(r => ({ id: r.id, updatedAt: r.updated_at })),
       serverTime: new Date().toISOString(),
