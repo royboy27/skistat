@@ -1,6 +1,6 @@
 const express = require('express');
 const { param, query: queryParam, validationResult } = require('express-validator');
-const { authenticate } = require('../middleware/auth');
+const { authenticate } = require('../src/middleware/auth');
 const { query } = require('../../config/database');
 const { success, error, paginated, NotFoundError } = require('../utils/helpers');
 
