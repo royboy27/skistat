@@ -1,278 +1,166 @@
 require('dotenv').config();
 const { pool } = require('../config/database');
-const router = express.Router();
 
-// ============================================
-// POST /v1/runs — Upload a run (NO express-validator)
-// ============================================
-router.post('/', authenticate, async (req, res, next) => {
-  try {
-    const {
-      id, clientId, startTime, endTime, runName, resortName, resortLatitude, resortLongitude,
-      distance, maxSpeed, averageSpeed, elevationDrop, startElevation, endElevation,
-      duration, points, difficulty, calories, avgHeartRate, maxHeartRate, routeData,
-    } = req.body;
+const migration = `
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-    // Accept either 'id' or 'clientId'
-    const runId = id || clientId;
-
-    if (!runId) return error(res, 'Run ID required (id or clientId)', 400);
-    if (!startTime) return error(res, 'startTime required', 400);
-
-    await query(
-      `INSERT INTO runs (
-        id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
-        start_time, end_time, distance, max_speed, average_speed,
-        elevation_drop, start_elevation, end_elevation, duration,
-        points, difficulty, calories, avg_heart_rate, max_heart_rate, route_data
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-      ON CONFLICT (id) DO UPDATE SET
-        run_name = EXCLUDED.run_name,
-        resort_name = EXCLUDED.resort_name,
-        end_time = EXCLUDED.end_time,
-        distance = EXCLUDED.distance,
-        max_speed = EXCLUDED.max_speed,
-        average_speed = EXCLUDED.average_speed,
-        elevation_drop = EXCLUDED.elevation_drop,
-        points = EXCLUDED.points,
-        difficulty = EXCLUDED.difficulty,
-        calories = EXCLUDED.calories,
-        avg_heart_rate = EXCLUDED.avg_heart_rate,
-        max_heart_rate = EXCLUDED.max_heart_rate,
-        route_data = EXCLUDED.route_data,
-        updated_at = NOW()`,
-      [
-        runId, req.user.id, runName || null, resortName || null,
-        resortLatitude || null, resortLongitude || null,
-        startTime, endTime || null,
-        distance || 0, maxSpeed || 0, averageSpeed || 0,
-        elevationDrop || 0, startElevation || 0, endElevation || 0,
-        duration || 0, points || 0, difficulty || 'blue',
-        calories || 0, avgHeartRate || 0, maxHeartRate || 0,
-        routeData ? JSON.stringify(routeData) : null,
-      ]
-    );
-
-    return success(res, { runId, clientId: runId, synced: true }, 201);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ============================================
-// POST /v1/runs/bulk — Upload multiple runs
-// ============================================
-router.post('/bulk', authenticate, async (req, res, next) => {
-  try {
-    const { runs } = req.body;
-    if (!Array.isArray(runs) || runs.length === 0) {
-      return error(res, 'Runs array required', 400);
-    }
-    if (runs.length > 50) {
-      return error(res, 'Maximum 50 runs per batch', 400);
-    }
-
-    const results = [];
-    for (const run of runs) {
-      try {
-        const runId = run.id || run.clientId;
-        if (!runId) { results.push({ clientId: 'unknown', status: 'error', error: 'No ID' }); continue; }
-
-        await query(
-          `INSERT INTO runs (
-            id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
-            start_time, end_time, distance, max_speed, average_speed,
-            elevation_drop, start_elevation, end_elevation, duration,
-            points, difficulty, calories, avg_heart_rate, max_heart_rate, route_data
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-          ON CONFLICT (id) DO UPDATE SET
-            run_name = EXCLUDED.run_name, resort_name = EXCLUDED.resort_name,
-            points = EXCLUDED.points, distance = EXCLUDED.distance,
-            max_speed = EXCLUDED.max_speed, elevation_drop = EXCLUDED.elevation_drop,
-            updated_at = NOW()`,
-          [
-            runId, req.user.id, run.runName || null, run.resortName || null,
-            run.resortLatitude || null, run.resortLongitude || null,
-            run.startTime, run.endTime || null,
-            run.distance || 0, run.maxSpeed || 0, run.averageSpeed || 0,
-            run.elevationDrop || 0, run.startElevation || 0, run.endElevation || 0,
-            run.duration || 0, run.points || 0, run.difficulty || 'blue',
-            run.calories || 0, run.avgHeartRate || 0, run.maxHeartRate || 0,
-            run.routeData ? JSON.stringify(run.routeData) : null,
-          ]
-        );
-        results.push({ clientId: runId, status: 'created', serverId: runId });
-      } catch (err) {
-        results.push({ clientId: run.id || run.clientId || 'unknown', status: 'error', error: err.message });
-      }
-    }
-
-    return success(res, { results });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ============================================
-// POST /v1/runs/batch — Alias for /bulk
-// ============================================
-router.post('/batch', authenticate, async (req, res, next) => {
-  // Forward to bulk handler
-  req.url = '/bulk';
-  router.handle(req, res, next);
-});
-
-// ============================================
-// GET /v1/runs — Get my runs (paginated)
-// ============================================
-router.get('/', authenticate,
-  [
-    queryParam('page').optional().isInt({ min: 1 }).toInt(),
-    queryParam('limit').optional().isInt({ min: 1, max: 100 }).toInt(),
-    queryParam('resort').optional().isString(),
-    queryParam('since').optional().isISO8601(),
-  ],
-  async (req, res, next) => {
-    try {
-      const page = parseInt(req.query.page) || 1;
-      const limit = parseInt(req.query.limit) || 20;
-      const offset = (page - 1) * limit;
-      const resort = req.query.resort;
-      const since = req.query.since;
-
-      let whereClause = 'user_id = $1 AND is_deleted = false';
-      const params = [req.user.id];
-      let paramIdx = 2;
-
-      if (resort) {
-        whereClause += ` AND resort_name = $${paramIdx++}`;
-        params.push(resort);
-      }
-      if (since) {
-        whereClause += ` AND start_time > $${paramIdx++}`;
-        params.push(since);
-      }
-
-      const countResult = await query(`SELECT COUNT(*) FROM runs WHERE ${whereClause}`, params);
-      const total = parseInt(countResult.rows[0].count);
-
-      const runsResult = await query(
-        `SELECT id, run_name, resort_name, resort_latitude, resort_longitude,
-                start_time, end_time, distance, max_speed, average_speed,
-                elevation_drop, start_elevation, end_elevation, duration,
-                points, difficulty, calories, avg_heart_rate, max_heart_rate,
-                created_at, updated_at
-         FROM runs
-         WHERE ${whereClause}
-         ORDER BY start_time DESC
-         LIMIT $${paramIdx++} OFFSET $${paramIdx}`,
-        [...params, limit, offset]
-      );
-
-      const runs = runsResult.rows.map(formatRun);
-      return paginated(res, runs, total, page, limit);
-    } catch (err) {
-      next(err);
-    }
-  }
+CREATE TABLE IF NOT EXISTS users (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email           VARCHAR(255) UNIQUE,
+  password_hash   VARCHAR(255),
+  apple_user_id   VARCHAR(255) UNIQUE,
+  display_name    VARCHAR(100) NOT NULL DEFAULT 'Skier',
+  home_resort     VARCHAR(255),
+  invite_code     VARCHAR(20) UNIQUE NOT NULL,
+  use_metric      BOOLEAN DEFAULT false,
+  weight_kg       DOUBLE PRECISION DEFAULT 75.0,
+  haptics_enabled BOOLEAN DEFAULT true,
+  battery_mode    VARCHAR(20) DEFAULT 'precision',
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),
+  last_login_at   TIMESTAMPTZ,
+  is_active       BOOLEAN DEFAULT true,
+  is_banned       BOOLEAN DEFAULT false
 );
 
-// ============================================
-// GET /v1/runs/:id — Get a specific run
-// ============================================
-router.get('/:id', authenticate,
-  [param('id').isUUID()],
-  async (req, res, next) => {
-    try {
-      const result = await query(
-        `SELECT * FROM runs WHERE id = $1 AND user_id = $2 AND is_deleted = false`,
-        [req.params.id, req.user.id]
-      );
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_apple_id ON users(apple_user_id);
+CREATE INDEX IF NOT EXISTS idx_users_invite_code ON users(invite_code);
 
-      if (result.rows.length === 0) throw new NotFoundError('Run');
-
-      const run = result.rows[0];
-      return success(res, {
-        ...formatRun(run),
-        routeData: run.route_data,
-      });
-    } catch (err) {
-      next(err);
-    }
-  }
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token       VARCHAR(500) NOT NULL,
+  device_info VARCHAR(255),
+  expires_at  TIMESTAMPTZ NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  revoked     BOOLEAN DEFAULT false
 );
 
-// ============================================
-// DELETE /v1/runs/:id — Soft delete a run
-// ============================================
-router.delete('/:id', authenticate,
-  [param('id').isUUID()],
-  async (req, res, next) => {
-    try {
-      const result = await query(
-        `UPDATE runs SET is_deleted = true, deleted_at = NOW()
-         WHERE id = $1 AND user_id = $2 AND is_deleted = false
-         RETURNING id`,
-        [req.params.id, req.user.id]
-      );
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token);
 
-      if (result.rows.length === 0) throw new NotFoundError('Run');
-
-      return success(res, { message: 'Run deleted' });
-    } catch (err) {
-      next(err);
-    }
-  }
+CREATE TABLE IF NOT EXISTS runs (
+  id              UUID PRIMARY KEY,
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  run_name        VARCHAR(255),
+  resort_name     VARCHAR(255),
+  resort_latitude DOUBLE PRECISION,
+  resort_longitude DOUBLE PRECISION,
+  start_time      TIMESTAMPTZ NOT NULL,
+  end_time        TIMESTAMPTZ,
+  distance        DOUBLE PRECISION DEFAULT 0,
+  max_speed       DOUBLE PRECISION DEFAULT 0,
+  average_speed   DOUBLE PRECISION DEFAULT 0,
+  elevation_drop  DOUBLE PRECISION DEFAULT 0,
+  start_elevation DOUBLE PRECISION DEFAULT 0,
+  end_elevation   DOUBLE PRECISION DEFAULT 0,
+  duration        DOUBLE PRECISION DEFAULT 0,
+  points          INTEGER DEFAULT 0,
+  difficulty      VARCHAR(50) DEFAULT 'Blue',
+  calories        DOUBLE PRECISION DEFAULT 0,
+  avg_heart_rate  DOUBLE PRECISION DEFAULT 0,
+  max_heart_rate  DOUBLE PRECISION DEFAULT 0,
+  route_data      JSONB,
+  is_deleted      BOOLEAN DEFAULT false,
+  deleted_at      TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-// ============================================
-// GET /v1/runs/sync/status
-// ============================================
-router.get('/sync/status', authenticate, async (req, res, next) => {
+CREATE INDEX IF NOT EXISTS idx_runs_user ON runs(user_id);
+CREATE INDEX IF NOT EXISTS idx_runs_user_start ON runs(user_id, start_time DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_resort ON runs(resort_name);
+CREATE INDEX IF NOT EXISTS idx_runs_not_deleted ON runs(user_id) WHERE is_deleted = false;
+
+CREATE TABLE IF NOT EXISTS friendships (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  friend_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status      VARCHAR(20) DEFAULT 'pending',
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, friend_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_friendships_user ON friendships(user_id);
+CREATE INDEX IF NOT EXISTS idx_friendships_friend ON friendships(friend_id);
+CREATE INDEX IF NOT EXISTS idx_friendships_status ON friendships(status);
+
+CREATE TABLE IF NOT EXISTS user_achievements (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  achievement_id  VARCHAR(100) NOT NULL,
+  unlocked_at     TIMESTAMPTZ DEFAULT NOW(),
+  season          VARCHAR(20),
+  UNIQUE(user_id, achievement_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_achievements_user ON user_achievements(user_id);
+
+CREATE TABLE IF NOT EXISTS device_tokens (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token       VARCHAR(500) NOT NULL,
+  platform    VARCHAR(20) DEFAULT 'ios',
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, token)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS lift_reports (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  resort_name VARCHAR(255) NOT NULL,
+  lift_name   VARCHAR(255) NOT NULL,
+  wait_minutes INTEGER,
+  status      VARCHAR(20),
+  latitude    DOUBLE PRECISION,
+  longitude   DOUBLE PRECISION,
+  reported_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_lift_reports_resort ON lift_reports(resort_name, reported_at DESC);
+
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+  CREATE TRIGGER users_updated_at BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TRIGGER runs_updated_at BEFORE UPDATE ON runs
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TRIGGER friendships_updated_at BEFORE UPDATE ON friendships
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+`;
+
+async function runMigration() {
+  console.log('Running database migration...');
   try {
-    const since = req.query.since || '1970-01-01T00:00:00Z';
-    const result = await query(
-      `SELECT id, updated_at FROM runs
-       WHERE user_id = $1 AND is_deleted = false AND updated_at > $2
-       ORDER BY updated_at DESC`,
-      [req.user.id, since]
-    );
-    return success(res, {
-      updatedRuns: result.rows.map(r => ({ id: r.id, updatedAt: r.updated_at })),
-      serverTime: new Date().toISOString(),
-    });
+    await pool.query(migration);
+    console.log('Migration completed successfully.');
   } catch (err) {
-    next(err);
+    console.error('Migration failed:', err.message);
+    process.exit(1);
+  } finally {
+    await pool.end();
   }
-});
-
-// ============================================
-// Format run for API response
-// ============================================
-function formatRun(row) {
-  return {
-    id: row.id,
-    runName: row.run_name,
-    resortName: row.resort_name,
-    resortLatitude: row.resort_latitude,
-    resortLongitude: row.resort_longitude,
-    startTime: row.start_time,
-    endTime: row.end_time,
-    distance: parseFloat(row.distance),
-    maxSpeed: parseFloat(row.max_speed),
-    averageSpeed: parseFloat(row.average_speed),
-    elevationDrop: parseFloat(row.elevation_drop),
-    startElevation: parseFloat(row.start_elevation),
-    endElevation: parseFloat(row.end_elevation),
-    duration: parseFloat(row.duration),
-    points: parseInt(row.points),
-    difficulty: row.difficulty,
-    calories: parseFloat(row.calories),
-    avgHeartRate: parseFloat(row.avg_heart_rate),
-    maxHeartRate: parseFloat(row.max_heart_rate),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
 }
 
-module.exports = router;
+runMigration();
