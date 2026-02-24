@@ -2,12 +2,19 @@ const express = require('express');
 const { param, query: queryParam, validationResult } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const { query } = require('../../config/database');
-const { success, error, paginated, NotFoundError } = require('../utils/helpers');
 
 const router = express.Router();
 
+// Helper functions (inline to avoid import issues)
+function ok(res, data, status = 200) {
+  return res.status(status).json({ error: false, ...data });
+}
+function fail(res, message, status = 400) {
+  return res.status(status).json({ error: true, message });
+}
+
 // ============================================
-// POST /v1/runs — Upload a run (NO express-validator)
+// POST /v1/runs — Upload a run
 // ============================================
 router.post('/', authenticate, async (req, res, next) => {
   try {
@@ -17,19 +24,17 @@ router.post('/', authenticate, async (req, res, next) => {
       duration, points, difficulty, calories, avgHeartRate, maxHeartRate, routeData,
     } = req.body;
 
-    // Accept either 'id' or 'clientId'
     const runId = id || clientId;
-
-    if (!runId) return error(res, 'Run ID required (id or clientId)', 400);
-    if (!startTime) return error(res, 'startTime required', 400);
+    if (!runId) return fail(res, 'Run ID required (id or clientId)', 400);
+    if (!startTime) return fail(res, 'startTime required', 400);
 
     await query(
       `INSERT INTO runs (
-        id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
+        id, client_id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
         start_time, end_time, distance, max_speed, average_speed,
         elevation_drop, start_elevation, end_elevation, duration,
         points, difficulty, calories, avg_heart_rate, max_heart_rate, route_data
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
       ON CONFLICT (id) DO UPDATE SET
         run_name = EXCLUDED.run_name,
         resort_name = EXCLUDED.resort_name,
@@ -46,7 +51,7 @@ router.post('/', authenticate, async (req, res, next) => {
         route_data = EXCLUDED.route_data,
         updated_at = NOW()`,
       [
-        runId, req.user.id, runName || null, resortName || null,
+        runId, runId, req.user.id, runName || null, resortName || null,
         resortLatitude || null, resortLongitude || null,
         startTime, endTime || null,
         distance || 0, maxSpeed || 0, averageSpeed || 0,
@@ -57,8 +62,9 @@ router.post('/', authenticate, async (req, res, next) => {
       ]
     );
 
-    return success(res, { runId, clientId: runId, synced: true }, 201);
+    return ok(res, { runId, clientId: runId, synced: true }, 201);
   } catch (err) {
+    console.error('Run upload error:', err.message);
     next(err);
   }
 });
@@ -70,10 +76,10 @@ router.post('/bulk', authenticate, async (req, res, next) => {
   try {
     const { runs } = req.body;
     if (!Array.isArray(runs) || runs.length === 0) {
-      return error(res, 'Runs array required', 400);
+      return fail(res, 'Runs array required', 400);
     }
     if (runs.length > 50) {
-      return error(res, 'Maximum 50 runs per batch', 400);
+      return fail(res, 'Maximum 50 runs per batch', 400);
     }
 
     const results = [];
@@ -84,18 +90,18 @@ router.post('/bulk', authenticate, async (req, res, next) => {
 
         await query(
           `INSERT INTO runs (
-            id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
+            id, client_id, user_id, run_name, resort_name, resort_latitude, resort_longitude,
             start_time, end_time, distance, max_speed, average_speed,
             elevation_drop, start_elevation, end_elevation, duration,
             points, difficulty, calories, avg_heart_rate, max_heart_rate, route_data
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
           ON CONFLICT (id) DO UPDATE SET
             run_name = EXCLUDED.run_name, resort_name = EXCLUDED.resort_name,
             points = EXCLUDED.points, distance = EXCLUDED.distance,
             max_speed = EXCLUDED.max_speed, elevation_drop = EXCLUDED.elevation_drop,
             updated_at = NOW()`,
           [
-            runId, req.user.id, run.runName || null, run.resortName || null,
+            runId, runId, req.user.id, run.runName || null, run.resortName || null,
             run.resortLatitude || null, run.resortLongitude || null,
             run.startTime, run.endTime || null,
             run.distance || 0, run.maxSpeed || 0, run.averageSpeed || 0,
@@ -107,11 +113,12 @@ router.post('/bulk', authenticate, async (req, res, next) => {
         );
         results.push({ clientId: runId, status: 'created', serverId: runId });
       } catch (err) {
+        console.error('Bulk run error:', err.message);
         results.push({ clientId: run.id || run.clientId || 'unknown', status: 'error', error: err.message });
       }
     }
 
-    return success(res, { results });
+    return ok(res, { results });
   } catch (err) {
     next(err);
   }
@@ -121,7 +128,6 @@ router.post('/bulk', authenticate, async (req, res, next) => {
 // POST /v1/runs/batch — Alias for /bulk
 // ============================================
 router.post('/batch', authenticate, async (req, res, next) => {
-  // Forward to bulk handler
   req.url = '/bulk';
   router.handle(req, res, next);
 });
@@ -129,105 +135,87 @@ router.post('/batch', authenticate, async (req, res, next) => {
 // ============================================
 // GET /v1/runs — Get my runs (paginated)
 // ============================================
-router.get('/', authenticate,
-  [
-    queryParam('page').optional().isInt({ min: 1 }).toInt(),
-    queryParam('limit').optional().isInt({ min: 1, max: 100 }).toInt(),
-    queryParam('resort').optional().isString(),
-    queryParam('since').optional().isISO8601(),
-  ],
-  async (req, res, next) => {
-    try {
-      const page = parseInt(req.query.page) || 1;
-      const limit = parseInt(req.query.limit) || 20;
-      const offset = (page - 1) * limit;
-      const resort = req.query.resort;
-      const since = req.query.since;
+router.get('/', authenticate, async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const offset = (page - 1) * limit;
+    const resort = req.query.resort;
+    const since = req.query.since;
 
-      let whereClause = 'user_id = $1 AND is_deleted = false';
-      const params = [req.user.id];
-      let paramIdx = 2;
+    let whereClause = 'user_id = $1 AND is_deleted = false';
+    const params = [req.user.id];
+    let paramIdx = 2;
 
-      if (resort) {
-        whereClause += ` AND resort_name = $${paramIdx++}`;
-        params.push(resort);
-      }
-      if (since) {
-        whereClause += ` AND start_time > $${paramIdx++}`;
-        params.push(since);
-      }
-
-      const countResult = await query(`SELECT COUNT(*) FROM runs WHERE ${whereClause}`, params);
-      const total = parseInt(countResult.rows[0].count);
-
-      const runsResult = await query(
-        `SELECT id, run_name, resort_name, resort_latitude, resort_longitude,
-                start_time, end_time, distance, max_speed, average_speed,
-                elevation_drop, start_elevation, end_elevation, duration,
-                points, difficulty, calories, avg_heart_rate, max_heart_rate,
-                created_at, updated_at
-         FROM runs
-         WHERE ${whereClause}
-         ORDER BY start_time DESC
-         LIMIT $${paramIdx++} OFFSET $${paramIdx}`,
-        [...params, limit, offset]
-      );
-
-      const runs = runsResult.rows.map(formatRun);
-      return paginated(res, runs, total, page, limit);
-    } catch (err) {
-      next(err);
+    if (resort) {
+      whereClause += ` AND resort_name = $${paramIdx++}`;
+      params.push(resort);
     }
+    if (since) {
+      whereClause += ` AND start_time > $${paramIdx++}`;
+      params.push(since);
+    }
+
+    const countResult = await query(`SELECT COUNT(*) FROM runs WHERE ${whereClause}`, params);
+    const total = parseInt(countResult.rows[0].count);
+
+    const runsResult = await query(
+      `SELECT id, run_name, resort_name, resort_latitude, resort_longitude,
+              start_time, end_time, distance, max_speed, average_speed,
+              elevation_drop, start_elevation, end_elevation, duration,
+              points, difficulty, calories, avg_heart_rate, max_heart_rate,
+              created_at, updated_at
+       FROM runs
+       WHERE ${whereClause}
+       ORDER BY start_time DESC
+       LIMIT $${paramIdx++} OFFSET $${paramIdx}`,
+      [...params, limit, offset]
+    );
+
+    const runs = runsResult.rows.map(formatRun);
+    return res.json({
+      error: false,
+      data: runs,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) }
+    });
+  } catch (err) {
+    next(err);
   }
-);
+});
 
 // ============================================
 // GET /v1/runs/:id — Get a specific run
 // ============================================
-router.get('/:id', authenticate,
-  [param('id').isUUID()],
-  async (req, res, next) => {
-    try {
-      const result = await query(
-        `SELECT * FROM runs WHERE id = $1 AND user_id = $2 AND is_deleted = false`,
-        [req.params.id, req.user.id]
-      );
-
-      if (result.rows.length === 0) throw new NotFoundError('Run');
-
-      const run = result.rows[0];
-      return success(res, {
-        ...formatRun(run),
-        routeData: run.route_data,
-      });
-    } catch (err) {
-      next(err);
-    }
+router.get('/:id', authenticate, async (req, res, next) => {
+  try {
+    const result = await query(
+      `SELECT * FROM runs WHERE id = $1 AND user_id = $2 AND is_deleted = false`,
+      [req.params.id, req.user.id]
+    );
+    if (result.rows.length === 0) return fail(res, 'Run not found', 404);
+    return ok(res, formatRun(result.rows[0]));
+  } catch (err) {
+    next(err);
   }
-);
+});
 
 // ============================================
 // DELETE /v1/runs/:id — Soft delete a run
 // ============================================
-router.delete('/:id', authenticate,
-  [param('id').isUUID()],
-  async (req, res, next) => {
-    try {
-      const result = await query(
-        `UPDATE runs SET is_deleted = true, deleted_at = NOW()
-         WHERE id = $1 AND user_id = $2 AND is_deleted = false
-         RETURNING id`,
-        [req.params.id, req.user.id]
-      );
-
-      if (result.rows.length === 0) throw new NotFoundError('Run');
-
-      return success(res, { message: 'Run deleted' });
-    } catch (err) {
-      next(err);
-    }
+router.delete('/:id', authenticate, async (req, res, next) => {
+  try {
+    const result = await query(
+      `UPDATE runs SET is_deleted = true, deleted_at = NOW()
+       WHERE id = $1 AND user_id = $2 AND is_deleted = false
+       RETURNING id`,
+      [req.params.id, req.user.id]
+    );
+    if (result.rows.length === 0) return fail(res, 'Run not found', 404);
+    return ok(res, { message: 'Run deleted' });
+  } catch (err) {
+    next(err);
   }
-);
+});
 
 // ============================================
 // GET /v1/runs/sync/status
@@ -241,7 +229,7 @@ router.get('/sync/status', authenticate, async (req, res, next) => {
        ORDER BY updated_at DESC`,
       [req.user.id, since]
     );
-    return success(res, {
+    return ok(res, {
       updatedRuns: result.rows.map(r => ({ id: r.id, updatedAt: r.updated_at })),
       serverTime: new Date().toISOString(),
     });
